@@ -8,6 +8,7 @@ The VPN itself is driven by a control command with three subcommands:
 """
 
 import argparse
+import os
 import shlex
 import subprocess
 import sys
@@ -96,7 +97,7 @@ class Menubar:
         self.toggle_action.triggered.connect(self.toggle)
         if log_file:
             self.menu.addAction("Show Log").triggered.connect(
-                lambda: subprocess.Popen(["/usr/bin/open", "-a", "Console", log_file])
+                lambda: self.show_log(log_file)
             )
         self.menu.addSeparator()
         self.menu.addAction("Quit").triggered.connect(QApplication.quit)
@@ -110,6 +111,12 @@ class Menubar:
         self.timer.timeout.connect(self.refresh)
         self.timer.start(POLL_INTERVAL_MS)
         self.refresh()
+
+    def show_log(self, log_file):
+        if os.path.exists(log_file):
+            subprocess.Popen(["/usr/bin/open", "-a", "Console", log_file])
+        else:
+            self.tray.showMessage(self.name, "No log yet: it's created on the first connect.")
 
     # State
 

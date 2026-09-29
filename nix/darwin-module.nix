@@ -10,6 +10,35 @@ let
     inherit (vpn) name allowLegacyTls;
     configFile = if vpn.configFile != null then vpn.configFile else "$HOME/.config/${vpn.name}/config";
   };
+
+  menubarLabel = "org.nixos.openconnect-sso-menubar";
+
+  # "<title>.app" in /Applications/Nix Apps, so the menu bar icon can be brought back
+  # (Spotlight, Raycast, Finder) after "Quit". It just starts the login item, which
+  # launchd keeps to a single instance.
+  menubarApp = pkgs.runCommand "openconnect-sso-menubar-app" { } ''
+    app="$out/Applications/${cfg.menubar.title}.app/Contents"
+    mkdir -p "$app/MacOS"
+    cat >"$app/Info.plist" <<EOF
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0">
+    <dict>
+      <key>CFBundleName</key><string>${cfg.menubar.title}</string>
+      <key>CFBundleIdentifier</key><string>${menubarLabel}.launcher</string>
+      <key>CFBundleExecutable</key><string>launcher</string>
+      <key>CFBundlePackageType</key><string>APPL</string>
+      <key>CFBundleVersion</key><string>${cfg.package.version}</string>
+      <key>LSUIElement</key><true/>
+    </dict>
+    </plist>
+    EOF
+    cat >"$app/MacOS/launcher" <<'EOF'
+    #!/bin/sh
+    exec /bin/launchctl kickstart "gui/$(/usr/bin/id -u)/${menubarLabel}"
+    EOF
+    chmod +x "$app/MacOS/launcher"
+  '';
 in
 {
   options.programs.openconnect-sso = {
@@ -89,6 +118,8 @@ in
         assertion = vpn.enable;
         message = "programs.openconnect-sso.menubar requires programs.openconnect-sso.splitTunnel.enable.";
       }];
+
+      environment.systemPackages = [ menubarApp ];
 
       launchd.user.agents.openconnect-sso-menubar.serviceConfig = {
         ProgramArguments = [
