@@ -35,6 +35,17 @@ def create_argparser():
     server_settings.add_argument("--proxy", help="Use a proxy server")
 
     server_settings.add_argument(
+        "--allow-legacy-tls",
+        help="Accept TLS ciphers without forward secrecy (TLS_RSA, CBC-SHA1) and "
+        "legacy renegotiation when talking to the VPN gateway, for old gateways that "
+        "support nothing newer. Only affects requests to the gateway itself; "
+        "certificates are still verified. OpenConnect already accepts these ciphers "
+        "for the tunnel",
+        action="store_true",
+        default=False,
+    )
+
+    server_settings.add_argument(
         "-s",
         "--server",
         help="VPN server to connect to. The following forms are accepted: "

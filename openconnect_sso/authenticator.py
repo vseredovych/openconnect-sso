@@ -1,7 +1,12 @@
+import ssl
+from urllib.parse import urlparse
+
 import attr
 import requests
 import structlog
 from lxml import etree, objectify
+from requests.adapters import HTTPAdapter
+from urllib3.util.ssl_ import create_urllib3_context
 
 from openconnect_sso.saml_authenticator import authenticate_in_browser
 
@@ -10,12 +15,17 @@ logger = structlog.get_logger()
 
 
 class Authenticator:
-    def __init__(self, host, proxy=None, credentials=None, version=None):
+    def __init__(
+        self, host, proxy=None, credentials=None, version=None, allow_legacy_tls=False
+    ):
         self.host = host
         self.proxy = proxy
         self.credentials = credentials
         self.version = version
+        self.allow_legacy_tls = allow_legacy_tls
         self.session = create_http_session(proxy, version)
+        if allow_legacy_tls:
+            allow_legacy_tls_for(self.session, self.host.vpn_url)
 
     async def authenticate(self, display_mode):
         self._detect_authentication_target_url()
@@ -55,9 +65,17 @@ class Authenticator:
     def _detect_authentication_target_url(self):
         # Follow possible redirects in a GET request
         # Authentication will occur using a POST request on the final URL
-        response = requests.get(self.host.vpn_url)
+        # (a plain GET: gateways may answer 404 to one with the AnyConnect headers)
+        probe = requests.Session()
+        probe.proxies = self.session.proxies
+        if self.allow_legacy_tls:
+            allow_legacy_tls_for(probe, self.host.vpn_url)
+        response = probe.get(self.host.vpn_url)
         response.raise_for_status()
         self.host.address = response.url
+        if self.allow_legacy_tls:
+            # The gateway may redirect to another host; relax TLS for that one too.
+            allow_legacy_tls_for(self.session, self.host.vpn_url)
         logger.debug("Auth target url", url=self.host.vpn_url)
 
     def _start_authentication(self):
@@ -106,6 +124,43 @@ def create_http_session(proxy, version):
         }
     )
     return session
+
+
+class LegacyTLSAdapter(HTTPAdapter):
+    """HTTPS adapter for gateways that only speak legacy TLS.
+
+    Allows ciphers without forward secrecy (TLS_RSA_*, CBC-SHA1) and legacy
+    renegotiation, like OpenConnect itself does. Certificates and host names are
+    still verified.
+    """
+
+    def init_poolmanager(self, *args, **kwargs):
+        context = create_urllib3_context()
+        context.set_ciphers("DEFAULT:@SECLEVEL=1")
+        context.options |= ssl.OP_LEGACY_SERVER_CONNECT
+        kwargs["ssl_context"] = context
+        return super().init_poolmanager(*args, **kwargs)
+
+
+_legacy_tls_warned = set()
+
+
+def allow_legacy_tls_for(session, url):
+    """Use LegacyTLSAdapter for requests to url's host only."""
+    host = urlparse(url).netloc
+    prefix = f"https://{host}/"
+    if prefix in session.adapters:
+        return
+    session.mount(prefix, LegacyTLSAdapter())
+    if host in _legacy_tls_warned:
+        return
+    _legacy_tls_warned.add(host)
+    logger.warning(
+        "Legacy TLS enabled: accepting ciphers without forward secrecy "
+        "(TLS_RSA, CBC-SHA1) and legacy renegotiation for this host only. "
+        "Certificates are still verified",
+        host=host,
+    )
 
 
 E = objectify.ElementMaker(annotate=False)

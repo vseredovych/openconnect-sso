@@ -1,19 +1,30 @@
 {
-  inputs = {
-    flake-utils.url = "github:numtide/flake-utils";
-  };
+  description = "OpenConnect wrapper supporting Azure AD (SAMLv2) authentication to Cisco SSL-VPNs";
 
-  outputs = { self, flake-utils, nixpkgs }: (flake-utils.lib.eachDefaultSystem (
-    system:
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+
+  outputs = { self, nixpkgs }:
     let
-      pkgs = nixpkgs.legacyPackages.${system};
-      openconnect-sso = (import ./nix { inherit pkgs; }).openconnect-sso;
+      systems = [ "aarch64-darwin" "x86_64-darwin" "x86_64-linux" "aarch64-linux" ];
+      forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
     in
     {
-      packages = { inherit openconnect-sso; };
-      defaultPackage = openconnect-sso;
-    }
-  ) // {
-      overlay = import ./overlay.nix;
-  });
+      packages = forAll (pkgs: rec {
+        openconnect-sso = pkgs.callPackage ./nix/package.nix { };
+        default = openconnect-sso;
+      });
+
+      overlays.default = final: prev: {
+        openconnect-sso = final.callPackage ./nix/package.nix { };
+      };
+
+      darwinModules.default = import ./nix/darwin-module.nix self;
+
+      devShells = forAll (pkgs: {
+        default = pkgs.mkShell {
+          inputsFrom = [ self.packages.${pkgs.stdenv.hostPlatform.system}.openconnect-sso ];
+          packages = with pkgs.python3Packages; [ black pytest pytest-asyncio pytest-httpserver ];
+        };
+      });
+    };
 }

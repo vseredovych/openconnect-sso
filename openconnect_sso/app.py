@@ -19,7 +19,7 @@ from openconnect_sso.browser import Terminated
 from openconnect_sso.config import Credentials
 from openconnect_sso.profile import get_profiles
 
-from requests.exceptions import HTTPError
+from requests.exceptions import HTTPError, SSLError
 
 logger = structlog.get_logger()
 
@@ -30,11 +30,12 @@ def run(args):
     cfg = config.load()
 
     try:
-        if os.name == "nt":
-            asyncio.set_event_loop(asyncio.ProactorEventLoop())
-        auth_response, selected_profile = asyncio.get_event_loop().run_until_complete(
-            _run(args, cfg)
+        # Python 3.14+ no longer creates an event loop implicitly.
+        loop = (
+            asyncio.ProactorEventLoop() if os.name == "nt" else asyncio.new_event_loop()
         )
+        asyncio.set_event_loop(loop)
+        auth_response, selected_profile = loop.run_until_complete(_run(args, cfg))
     except KeyboardInterrupt:
         logger.warn("CTRL-C pressed, exiting")
         return 130
@@ -53,6 +54,14 @@ def run(args):
     except HTTPError as exc:
         logger.error(f"Request error: {exc}")
         return 4
+    except SSLError as exc:
+        logger.error(f"TLS error: {exc}")
+        if not args.allow_legacy_tls:
+            logger.error(
+                "If the gateway only supports old TLS ciphers, retry with "
+                "--allow-legacy-tls (see --help for what it relaxes)"
+            )
+        return 5
 
     config.save(cfg)
 
@@ -150,7 +159,12 @@ async def _run(args, cfg):
     display_mode = config.DisplayMode[args.browser_display_mode.upper()]
 
     auth_response = await authenticate_to(
-        selected_profile, args.proxy, credentials, display_mode, args.ac_version
+        selected_profile,
+        args.proxy,
+        credentials,
+        display_mode,
+        args.ac_version,
+        args.allow_legacy_tls,
     )
 
     if args.on_disconnect and not cfg.on_disconnect:
@@ -178,9 +192,13 @@ async def select_profile(profile_list):
     return selection
 
 
-def authenticate_to(host, proxy, credentials, display_mode, version):
+def authenticate_to(
+    host, proxy, credentials, display_mode, version, allow_legacy_tls=False
+):
     logger.info("Authenticating to VPN endpoint", name=host.name, address=host.address)
-    return Authenticator(host, proxy, credentials, version).authenticate(display_mode)
+    return Authenticator(
+        host, proxy, credentials, version, allow_legacy_tls
+    ).authenticate(display_mode)
 
 
 def run_openconnect(auth_info, host, proxy, version, args):

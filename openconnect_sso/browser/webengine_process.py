@@ -3,11 +3,13 @@ import json
 import multiprocessing
 import signal
 import sys
+from importlib import resources
+from pathlib import Path
 from urllib.parse import urlparse
 
 import attr
-import pkg_resources
 import structlog
+import xdg.BaseDirectory
 
 from PyQt6.QtCore import QUrl, QTimer, pyqtSlot, Qt
 from PyQt6.QtNetwork import QNetworkCookie, QNetworkProxy
@@ -20,6 +22,7 @@ from openconnect_sso import config
 
 app = None
 profile = None
+gateway_cookies = []
 logger = structlog.get_logger("webengine")
 
 
@@ -80,7 +83,7 @@ class Process(multiprocessing.Process):
         if self.display_mode == config.DisplayMode.HIDDEN:
             argv += ["-platform", "minimal"]
         app = QApplication(argv)
-        profile = QWebEngineProfile("openconnect-sso")
+        profile = create_profile()
 
         if self.proxy:
             parsed = urlparse(self.proxy)
@@ -102,10 +105,15 @@ class Process(multiprocessing.Process):
             pass
 
         force_python_execution.timeout.connect(ignore)
-        web = WebBrowser(cfg.auto_fill_rules, self._states.put, profile)
-
         startup_info = self._commands.get()
         logger.info("Browser started", startup_info=startup_info)
+
+        web = WebBrowser(
+            cfg.auto_fill_rules,
+            self._states.put,
+            profile,
+            urlparse(startup_info.url).hostname,
+        )
 
         logger.info("Loading page", url=startup_info.url)
 
@@ -123,9 +131,31 @@ class Process(multiprocessing.Process):
         self.join()
 
 
+def create_profile():
+    """On-disk web profile, so the identity provider's sign-in ("Stay signed in?")
+    survives between runs. Delete the directory to forget the sign-in."""
+    storage = Path(xdg.BaseDirectory.save_data_path(config.APP_NAME)) / "webengine"
+    storage.mkdir(mode=0o700, exist_ok=True)
+    profile = QWebEngineProfile(config.APP_NAME)
+    profile.setPersistentStoragePath(str(storage))
+    profile.setCachePath(str(storage / "cache"))
+    profile.setPersistentCookiesPolicy(
+        QWebEngineProfile.PersistentCookiesPolicy.AllowPersistentCookies
+    )
+    # Only persistent cookies (the sign-in) should carry over between runs; session
+    # cookies left over from an earlier login (e.g. the gateway's) must not.
+    profile.cookieStore().deleteSessionCookies()
+    return profile
+
+
 def on_sigterm(signum, frame):
     global profile
     logger.info("Terminate requested.")
+
+    # The gateway's cookies (including its one-time SSO token) are only valid for this
+    # login. Forget them now that the gateway has finished using them.
+    for cookie in gateway_cookies:
+        profile.cookieStore().deleteCookie(cookie)
     # Force flush cookieStore to disk. Without this hack the cookieStore may
     # not be synced at all if the browser lives only for a short amount of
     # time. Something is off with the call order of destructors as there is no
@@ -142,8 +172,9 @@ def on_sigterm(signum, frame):
 
 
 class WebBrowser(QWebEngineView):
-    def __init__(self, auto_fill_rules, on_update, profile):
+    def __init__(self, auto_fill_rules, on_update, profile, gateway_host):
         super().__init__()
+        self._gateway_host = gateway_host
         self._on_update = on_update
         self._auto_fill_rules = auto_fill_rules
         page = QWebEnginePage(profile, self)
@@ -158,7 +189,9 @@ class WebBrowser(QWebEngineView):
             return self._popupWindow.view()
 
     def authenticate_at(self, url, credentials):
-        script_source = pkg_resources.resource_string(__name__, "user.js").decode()
+        script_source = (
+            resources.files(__package__).joinpath("user.js").read_text(encoding="utf-8")
+        )
         script = QWebEngineScript()
         script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
         script.setWorldId(QWebEngineScript.ScriptWorldId.ApplicationWorld)
@@ -190,6 +223,8 @@ autoFill();
 
     def _on_cookie_added(self, cookie):
         logger.debug("Cookie set", name=to_str(cookie.name()))
+        if cookie.domain().lstrip(".") == self._gateway_host:
+            gateway_cookies.append(QNetworkCookie(cookie))
         self._on_update(SetCookie(to_str(cookie.name()), to_str(cookie.value())))
 
     def _on_load_finished(self, success):

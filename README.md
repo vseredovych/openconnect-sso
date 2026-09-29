@@ -52,42 +52,66 @@ yay -S openconnect-sso
 
 ### Using nix
 
-The easiest method to try is by installing directly:
+The flake provides the package, an overlay and a nix-darwin module:
 
 ```shell
-$ nix-env -i -f https://github.com/vlaci/openconnect-sso/archive/master.tar.gz
-unpacking 'https://github.com/vlaci/openconnect-sso/archive/master.tar.gz'...
-[...]
-installing 'openconnect-sso-0.4.0'
-these derivations will be built:
-  /nix/store/2z47740z1rr2cfqfin5lnq04sq3c5xjg-openconnect-sso-0.4.0.drv
-[...]
-building '/nix/store/50q496iqf840wi8b95cfmgn07k6y5b59-user-environment.drv'...
-created 606 symlinks in user environment
-$ openconnect-sso
+$ nix run github:vseredovych/openconnect-sso -- --server vpn.example.com
 ```
 
-An overlay is also available to use in nix expressions:
-
 ``` nix
-let
-  openconnectOverlay = import "${builtins.fetchTarball https://github.com/vlaci/openconnect-sso/archive/master.tar.gz}/overlay.nix";
-  pkgs = import <nixpkgs> { overlays = [ openconnectOverlay ]; };
-in
-  #  pkgs.openconnect-sso is available in this context
-```
-
-... or to use in `configuration.nix`:
-
-``` nix
-{ config, ... }:
-
 {
-  nixpkgs.overlays = [
-    (import "${builtins.fetchTarball https://github.com/vlaci/openconnect-sso/archive/master.tar.gz}/overlay.nix")
-  ];
+  inputs.openconnect-sso.url = "github:vseredovych/openconnect-sso";
+  # packages.<system>.default, overlays.default, darwinModules.default
 }
 ```
+
+### macOS (nix-darwin): split tunnel + menu bar
+
+`darwinModules.default` adds a split-tunnel VPN command and an optional menu bar icon:
+
+``` nix
+{
+  imports = [ inputs.openconnect-sso.darwinModules.default ];
+
+  programs.openconnect-sso = {
+    enable = true;
+    splitTunnel = {
+      enable = true;
+      name = "work-vpn";         # command: work-vpn up | down | status | log
+      # allowLegacyTls = true;   # only for gateways without modern TLS, see below
+    };
+    menubar.enable = true;       # lock icon in the menu bar, started at login
+  };
+}
+```
+
+The connection details stay private, out of the Nix store, in `~/.config/<name>/config`:
+
+```shell
+SERVER=vpn.example.com
+AUTHGROUP=GROUP-NAME
+DNS="10.0.0.53 10.0.1.53"                  # used only for DOMAINS (macOS /etc/resolver)
+DOMAINS="corp.example.com example.internal"
+ROUTES="10.0.0.0/16 192.0.2.0/24"          # only these go through the VPN
+```
+
+`<name> up` opens the SSO window, then runs `openconnect` in the background with
+[vpn-slice](https://github.com/dlenski/vpn-slice) as its script. Only a small root helper
+runs as root; it validates its arguments, and the module lets `system.primaryUser` run it
+without a password so the menu bar can connect. Logs: `<name> log`.
+
+The login window keeps its own on-disk profile (`~/.local/share/openconnect-sso/webengine`),
+so answering *Stay signed in? → Yes* once lets later logins skip the password and MFA,
+as far as the identity provider's policy allows. Delete that directory to forget it.
+
+#### Legacy TLS gateways
+
+Some gateways only offer TLS ciphers without forward secrecy (`TLS_RSA_*`, CBC-SHA1).
+Python rejects those by default, so the login fails with an `SSL ... handshake failure`.
+`--allow-legacy-tls` (or `allowLegacyTls = true`) accepts them, and legacy renegotiation,
+**for the gateway's host only**. Certificates and host names are still verified. OpenConnect
+itself already accepts these ciphers for the tunnel. Each run logs a warning, and the module
+adds an evaluation warning, until you turn it off.
 
 ### Windows *(EXPERIMENTAL)*
 
