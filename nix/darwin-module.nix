@@ -105,12 +105,6 @@ in
       security.sudo.extraConfig = ''
         ${config.system.primaryUser} ALL=(root) NOPASSWD: ${splitTunnel.helper}
       '';
-
-      warnings = lib.optional vpn.allowLegacyTls ''
-        programs.openconnect-sso.splitTunnel.allowLegacyTls is enabled: the SSO login to
-        the gateway accepts TLS without forward secrecy (TLS_RSA, CBC-SHA1). Certificates
-        are still verified. Disable it once the gateway supports modern TLS.
-      '';
     })
 
     (lib.mkIf cfg.menubar.enable {

@@ -68,8 +68,7 @@ Some gateways only offer ciphers without forward secrecy (`TLS_RSA_*`, CBC-SHA1)
 login fails with `SSL ... handshake failure`. `--allow-legacy-tls` (module:
 `allowLegacyTls = true`) accepts them, plus legacy renegotiation, **for the gateway's host
 only**. Certificates and host names are still verified, and OpenConnect already accepts
-these ciphers for the tunnel. It's opt-in, logs a warning on every login, and the module
-adds a build-time warning while it's on.
+these ciphers for the tunnel. It's opt-in and logs a warning on every login.
 
 ## Usage
 
