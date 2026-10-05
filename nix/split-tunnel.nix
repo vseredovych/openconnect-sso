@@ -82,8 +82,12 @@ let
         ;;
       down)
         if running; then
-          kill -INT "$pid" # clean shutdown: logs the session off, vpn-slice cleans up
-          for _ in $(seq 50); do running || break; sleep 0.2; done
+          # Clean shutdown first (logs the session off, vpn-slice cleans up); that can hang
+          # when the tunnel is already dead, so escalate.
+          for sig in INT TERM KILL; do
+            kill -"$sig" "$pid" 2>/dev/null || true
+            for _ in $(seq 25); do running || break 2; sleep 0.2; done
+          done
           running && fail "openconnect (pid $pid) did not exit"
         fi
         rm -f ${pidFile} ${hostFile}
@@ -110,18 +114,39 @@ let
     EOF
     }
 
-    status() {
+    process_alive() {
       local pid
-      pid="$(cat ${pidFile} 2>/dev/null)" || { echo "Disconnected"; return 1; }
-      if [[ "$pid" =~ ^[0-9]+$ ]] && ps -p "$pid" -o comm= 2>/dev/null | grep -q openconnect; then
-        local url
-        url="$(cat ${hostFile} 2>/dev/null)"
-        url="''${url#https://}"
-        echo "Connected to ''${url%%/*}"
-      else
+      pid="$(cat ${pidFile} 2>/dev/null)" || return 1
+      [[ "$pid" =~ ^[0-9]+$ ]] && ps -p "$pid" -o comm= 2>/dev/null | grep -q openconnect
+    }
+
+    # Tunnel state since the last connect, from openconnect's log: ok | reconnecting | failed.
+    # (DTLS dead peer alone is fine: openconnect falls back to the TLS channel.)
+    tunnel_state() {
+      awk '
+        /^=== /                                                   { s = "ok" }
+        /CSTP connected|Configured as/                            { s = "ok" }
+        /CSTP Dead Peer Detection|Failed to reconnect|remaining timeout/ { s = "reconnecting" }
+        /Reconnect failed/                                        { s = "failed" }
+        END { print s }
+      ' ${logFile} 2>/dev/null
+    }
+
+    # exit 0: connected, 1: disconnected, 3: openconnect is trying to reconnect
+    status() {
+      if ! process_alive; then
         echo "Disconnected"
         return 1
       fi
+      local url
+      url="$(cat ${hostFile} 2>/dev/null)"
+      url="''${url#https://}"
+      url="''${url%%/*}"
+      case "$(tunnel_state)" in
+        reconnecting) echo "Reconnecting to $url (tunnel down)"; return 3 ;;
+        failed) echo "Disconnected (reconnect to $url failed)"; return 1 ;;
+        *) echo "Connected to $url" ;;
+      esac
     }
 
     up() {
@@ -129,6 +154,8 @@ let
         status
         return 0
       fi
+      # Clear out a dead or still-reconnecting session first.
+      process_alive && { /usr/bin/sudo ${helper} down || return 1; }
 
       local config="${configFile}"
       if [[ ! -r "$config" ]]; then

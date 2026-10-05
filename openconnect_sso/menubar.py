@@ -4,7 +4,8 @@ The VPN itself is driven by a control command with three subcommands:
 
     <command> up       log in and connect; exits once connected (non-zero on failure)
     <command> down     disconnect
-    <command> status   exit 0 and print a one-line description if connected, else exit 1
+    <command> status   print a one-line description; exit 0 if connected, 3 if the tunnel
+                       is down but the client is still trying to reconnect, else 1
 """
 
 import argparse
@@ -78,6 +79,7 @@ class Menubar:
         self.command = command
         self.name = name
         self.connected = False
+        self.reconnecting = False
         self.detail = ""
         self.action_process = None  # running `up` / `down`
         self.status_process = None
@@ -126,6 +128,8 @@ class Menubar:
     def render(self):
         if self.busy():
             state, text = "busy", self.action_process.property("label")
+        elif self.reconnecting:
+            state, text = "busy", self.detail or "Reconnecting…"
         elif self.connected:
             state, text = "connected", self.detail or "Connected"
         else:
@@ -134,7 +138,9 @@ class Menubar:
         self.tray.setIcon(self.icons[state])
         self.tray.setToolTip(f"{self.name}: {text}")
         self.status_action.setText(f"{self.name}: {text}")
-        self.toggle_action.setText("Disconnect" if self.connected else "Connect")
+        self.toggle_action.setText(
+            "Disconnect" if self.connected or self.reconnecting else "Connect"
+        )
         self.toggle_action.setEnabled(not self.busy())
 
     # Commands
@@ -152,9 +158,20 @@ class Menubar:
 
         def done(exit_code, _status):
             self.status_process = None
+            was_up = self.connected or self.reconnecting
             self.connected = exit_code == 0
+            self.reconnecting = exit_code == 3
             output = bytes(process.readAll()).decode(errors="replace").strip()
-            self.detail = output.splitlines()[-1] if self.connected and output else ""
+            last_line = output.splitlines()[-1] if output else ""
+            self.detail = last_line if self.connected or self.reconnecting else ""
+            if was_up and not (self.connected or self.reconnecting):
+                # Dropped without the user clicking Disconnect (that path is "busy").
+                self.last_error = last_line or "Connection lost"
+                self.tray.showMessage(
+                    self.name,
+                    f"Connection lost: {self.last_error}",
+                    QSystemTrayIcon.MessageIcon.Warning,
+                )
             self.render()
 
         process.finished.connect(done)
@@ -162,7 +179,7 @@ class Menubar:
     def toggle(self):
         if self.busy():
             return
-        subcommand = "down" if self.connected else "up"
+        subcommand = "down" if self.connected or self.reconnecting else "up"
         process = self.action_process = self.run(subcommand)
         process.setProperty(
             "label", "Disconnecting…" if subcommand == "down" else "Connecting…"
@@ -172,6 +189,9 @@ class Menubar:
 
         def done(exit_code, _status):
             self.action_process = None
+            if subcommand == "down" and exit_code == 0:
+                # Intentional disconnect: don't report it as a lost connection.
+                self.connected = self.reconnecting = False
             if exit_code != 0:
                 output = bytes(process.readAll()).decode(errors="replace").strip()
                 reason = output.splitlines()[-1] if output else f"exit code {exit_code}"
