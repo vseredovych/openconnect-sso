@@ -31,7 +31,28 @@ let
     export INTERNAL_IP4_DNS="''${1//,/ }"
     domains="$2"
     shift 2
-    exec ${vpn-slice}/bin/vpn-slice --domains-vpn-dns "$domains" "$@"
+    ${vpn-slice}/bin/vpn-slice --domains-vpn-dns "$domains" "$@" || exit
+
+    # vpn-slice pins a host route to the gateway via the router of the network we're on
+    # now. After a network change (sleep, other Wi-Fi) that router is gone and every
+    # reconnect fails ("Can't assign requested address"). With a split tunnel the pin is
+    # only needed if a VPN route covers the gateway, so drop it otherwise and let the
+    # gateway follow the current default route.
+    ip2int() { local IFS=.; set -- $1; echo $(( ($1 << 24) + ($2 << 16) + ($3 << 8) + $4 )); }
+    covered() {
+      local gw net bits
+      gw="$(ip2int "$1")"; shift
+      for route in "$@"; do
+        [[ "$route" =~ ^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)(/([0-9]+))?$ ]] || continue
+        net="$(ip2int "''${BASH_REMATCH[1]}")"; bits="''${BASH_REMATCH[3]:-32}"
+        (( bits == 0 || (gw ^ net) >> (32 - bits) == 0 )) && return 0
+      done
+      return 1
+    }
+    if [[ "''${reason:-}" == connect && "''${VPNGATEWAY:-}" =~ ^[0-9]+(\.[0-9]+){3}$ ]] \
+      && ! covered "$VPNGATEWAY" "$@"; then
+      route -n delete -host "$VPNGATEWAY" >/dev/null 2>&1 || true
+    fi
   '';
 
   helper = writeShellScript "${name}-helper" ''
